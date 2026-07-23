@@ -1,0 +1,60 @@
+{
+  "name": "claude-ntfy-toggle",
+  "displayName": "Claude ntfy toggle",
+  "description": "Status bar toggle + phone push (ntfy) when a Claude Code request finishes",
+  "version": "1.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "claudeNtfy.toggle",
+        "title": "Claude: переключить уведомления на телефон"
+      },
+      {
+        "command": "claudeNtfy.test",
+        "title": "Claude: отправить тестовое уведомление"
+      }
+    ],
+    "configuration": {
+      "title": "Claude ntfy",
+      "properties": {
+        "claudeNtfy.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Отправлять уведомление на телефон, когда запрос Claude Code завершился."
+        },
+        "claudeNtfy.topic": {
+          "type": "string",
+          "default": "",
+          "description": "Имя вашего личного топика ntfy (на него подписан телефон в приложении ntfy). Топики публичные - придумайте непредсказуемое имя. Пока пусто, уведомления не отправляются."
+        },
+        "claudeNtfy.title": {
+          "type": "string",
+          "default": "Claude Code",
+          "description": "Заголовок уведомления."
+        },
+        "claudeNtfy.message": {
+          "type": "string",
+          "default": "Запрос в Claude Code завершён",
+          "description": "Текст уведомления."
+        },
+        "claudeNtfy.server": {
+          "type": "string",
+          "default": "https://ntfy.sh",
+          "description": "Базовый URL сервера ntfy."
+        }
+      }
+    }
+  }
+}
