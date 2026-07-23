@@ -7,13 +7,13 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/abdurakhmanov777/claude-ping.git",
+    "url": "https://github.com/abdurakhmanov777/claude-notify.git",
     "directory": "claude-notify"
   },
   "bugs": {
-    "url": "https://github.com/abdurakhmanov777/claude-ping/issues"
+    "url": "https://github.com/abdurakhmanov777/claude-notify/issues"
   },
-  "homepage": "https://github.com/abdurakhmanov777/claude-ping#readme",
+  "homepage": "https://github.com/abdurakhmanov777/claude-notify#readme",
   "keywords": [
     "claude",
     "claude code",
