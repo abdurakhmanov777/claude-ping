@@ -1,6 +1,8 @@
 # Claude Notify
 
-Уведомление на телефон, когда **запрос в Claude Code завершился**. В статус-баре VS Code — кнопка-переключатель, пуш приходит через бесплатный сервис [ntfy.sh](https://ntfy.sh) в приложение на Android/iOS.
+Уведомление на телефон, когда **запрос в Claude Code завершился** — и когда **Claude ждёт вашего разрешения**. В статус-баре VS Code — кнопка-переключатель, пуш приходит через бесплатный сервис [ntfy.sh](https://ntfy.sh) в приложение на Android/iOS.
+
+В уведомлении видно, **какой проект** доработал — удобно, когда открыто несколько окон.
 
 Работает молча: клик по кнопке включает/выключает, ничего не всплывает. Кнопка показывает состояние иконкой: 🔔 - включено, 🔕 - выключено.
 
@@ -10,7 +12,7 @@
 
 - **VS Code** (стабильный) и **Claude Code** (расширение/CLI) в нём.
 - **Телефон** с приложением **ntfy** (Android: Google Play / F-Droid; iOS: App Store).
-- Для хука на Windows проще всего **Git Bash** (ставится вместе с Git). Если Git Bash нет — ниже есть вариант хука на PowerShell. На macOS/Linux ничего доставлять не нужно.
+- Для хуков на Windows проще всего **Git Bash** (ставится вместе с Git). Если его нет, расширение само подставит вариант на PowerShell. На macOS/Linux ничего доставлять не нужно.
 
 ---
 
@@ -39,15 +41,22 @@ node -e "console.log('claude-'+require('crypto').randomBytes(8).toString('hex'))
 
 (или `openssl rand -hex 8`). Пример: `claude-9f2a7c14bb03de55`. Пока топик пустой, уведомления не отправляются.
 
-Остальное по желанию: **Title** (заголовок), **Message** (текст), **Enabled** (вкл/выкл), **Server**, **Priority**, **Tags**, **Click**, **Token** — см. таблицу ниже.
+Остальное по желанию — см. таблицу настроек ниже.
 
 ### 3. Подписаться на телефоне
 
 Открыть приложение **ntfy** → **+** (Subscribe to topic) → ввести **ровно тот же** топик, что и в настройках → Subscribe.
 
-### 4. Добавить триггер в Claude Code
+### 4. Настроить хуки Claude Code
 
-Расширение узнаёт о завершении запроса через хук Claude Code. Открыть файл настроек Claude Code `~/.claude/settings.json` (Windows: `C:\Users\<вы>\.claude\settings.json`) и добавить блок `hooks` (если блок уже есть - дописать объект в массив `Stop`).
+Расширение узнаёт о событиях через хуки Claude Code. Проще всего — **одной командой**:
+
+`Ctrl+Shift+P` → **Claude Notify: настроить хуки Claude Code**
+
+Команда сама впишет оба хука в `~/.claude/settings.json`, сохранит прежнюю версию файла как `settings.json.backup`, не тронет ваши другие хуки и выберет `bash` или `powershell` под вашу систему. После неё **перезапустите сессию Claude Code**, чтобы хуки применились.
+
+<details>
+<summary>Вручную (если хочется контролировать самому)</summary>
 
 **macOS / Linux / Windows с Git Bash:**
 
@@ -61,7 +70,19 @@ node -e "console.log('claude-'+require('crypto').randomBytes(8).toString('hex'))
             "type": "command",
             "shell": "bash",
             "async": true,
-            "command": "echo >> \"$HOME/.claude/.ntfy-trigger\" || true"
+            "command": "echo \"$CLAUDE_PROJECT_DIR\" >> \"$HOME/.claude/.ntfy-trigger\" || true"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "async": true,
+            "command": "echo \"$CLAUDE_PROJECT_DIR\" >> \"$HOME/.claude/.ntfy-trigger-waiting\" || true"
           }
         ]
       }
@@ -82,7 +103,19 @@ node -e "console.log('claude-'+require('crypto').randomBytes(8).toString('hex'))
             "type": "command",
             "shell": "powershell",
             "async": true,
-            "command": "Add-Content -Path \"$env:USERPROFILE\\.claude\\.ntfy-trigger\" -Value x"
+            "command": "Add-Content -Path \"$env:USERPROFILE\\.claude\\.ntfy-trigger\" -Value $env:CLAUDE_PROJECT_DIR"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "powershell",
+            "async": true,
+            "command": "Add-Content -Path \"$env:USERPROFILE\\.claude\\.ntfy-trigger-waiting\" -Value $env:CLAUDE_PROJECT_DIR"
           }
         ]
       }
@@ -91,7 +124,9 @@ node -e "console.log('claude-'+require('crypto').randomBytes(8).toString('hex'))
 }
 ```
 
-Хук просто «трогает» файл `~/.claude/.ntfy-trigger` - никаких данных об уведомлении в нём нет, всё остальное делает расширение.
+Хук дописывает в файл-триггер только путь проекта (`$CLAUDE_PROJECT_DIR`) — по нему расширение подставляет имя проекта в уведомление. Хук `Notification` нужен только для пушей «Claude ждёт разрешения»; без него всё остальное работает.
+
+</details>
 
 ### 5. Перезагрузить и проверить
 
@@ -107,29 +142,41 @@ node -e "console.log('claude-'+require('crypto').randomBytes(8).toString('hex'))
 |---|---|---|
 | `claudeNotify.enabled` | `true` | Слать пуши или нет (то же, что кнопка в статус-баре). |
 | `claudeNotify.topic` | *(пусто)* | Ваш личный топик ntfy. Обязательно задать. |
-| `claudeNotify.title` | `Claude Code` | Заголовок уведомления. |
-| `claudeNotify.message` | `Запрос в Claude Code завершён` | Текст уведомления. |
+| `claudeNotify.title` | `Claude Code · {project}` | Заголовок уведомления. `{project}` - имя папки проекта. |
+| `claudeNotify.message` | `Запрос в Claude Code завершён` | Текст уведомления о завершении. Поддерживает `{project}`. |
+| `claudeNotify.notifyOnWaiting` | `true` | Слать отдельный пуш, когда Claude ждёт ответа/разрешения (нужен хук `Notification`). |
+| `claudeNotify.waitingMessage` | `Claude ждёт вашего разрешения` | Текст такого уведомления. Поддерживает `{project}`. |
 | `claudeNotify.server` | `https://ntfy.sh` | Сервер ntfy (можно свой self-hosted). |
 | `claudeNotify.token` | *(пусто)* | Bearer-токен для защищённых топиков на своём сервере. Для ntfy.sh не нужен. |
 | `claudeNotify.priority` | `default` | Приоритет пуша: `min`, `low`, `default`, `high`, `max`. |
 | `claudeNotify.tags` | *(пусто)* | Теги/эмодзи ntfy через запятую, напр. `white_check_mark,robot`. [Список эмодзи](https://docs.ntfy.sh/emojis/). |
 | `claudeNotify.click` | *(пусто)* | URL, открывающийся при тапе по уведомлению. |
 
-Команды (палитра `Ctrl+Shift+P`): **Claude Notify: переключить уведомления на телефон**, **Claude Notify: отправить тестовое уведомление**.
+### Подстановка `{project}`
+
+`{project}` в заголовке и тексте заменяется на имя папки проекта, в котором работал Claude Code. Если проект неизвестен (например, хук ещё старой версии), подстановка убирается вместе с повисшим разделителем: `Claude Code · {project}` → `Claude Code`.
+
+### Команды
+
+Палитра `Ctrl+Shift+P`:
+- **Claude Notify: переключить уведомления на телефон**
+- **Claude Notify: отправить тестовое уведомление**
+- **Claude Notify: настроить хуки Claude Code**
 
 ---
 
 ## Как это устроено
 
-- **Хук Claude Code** (`Stop`) при завершении запроса дописывает файл `~/.claude/.ntfy-trigger`. Только Claude Code знает момент завершения, поэтому этот однострочный триггер обязателен.
-- **Расширение** следит за `~/.claude` (плюс резервный опрос на случай пропущенного события) и при появлении триггера шлёт пуш на ntfy (Node `https`, JSON-публикация - корректный UTF-8 в заголовке и тексте). При нескольких открытых окнах VS Code триггер «захватывается» атомарно, так что пуш уходит ровно один раз.
+- **Хуки Claude Code** дописывают путь проекта в файлы-триггеры: `Stop` → `~/.claude/.ntfy-trigger` (запрос завершён), `Notification` → `~/.claude/.ntfy-trigger-waiting` (Claude ждёт ответа). Только Claude Code знает эти моменты, поэтому хуки обязательны.
+- **Расширение** следит за `~/.claude` (плюс резервный опрос на случай пропущенного события) и при появлении триггера читает из него проект и шлёт пуш на ntfy (Node `https`, JSON-публикация - корректный UTF-8 в заголовке и тексте). При нескольких открытых окнах VS Code триггер «захватывается» атомарно, так что пуш уходит ровно один раз.
 - Кнопка в статус-баре переключает настройку `claudeNotify.enabled`.
 
 ## Приватность и ограничения
 
 - Пуш уходит, только когда открыт VS Code с расширением (для работы в Claude Code это всегда так).
 - Топик ntfy **публичный**: кто знает имя - может читать и слать в него. Держите имя случайным. Для приватности поднимите свой ntfy-сервер, укажите его в `claudeNotify.server` и задайте `claudeNotify.token`.
-- Расширение работает на Windows/macOS/Linux. Хуку на Windows нужен Git Bash **или** вариант на PowerShell (см. шаг 4).
+- В триггер попадает только путь проекта — ни кода, ни текста переписки с Claude.
+- Расширение работает на Windows/macOS/Linux.
 
 ## Сборка из исходников
 

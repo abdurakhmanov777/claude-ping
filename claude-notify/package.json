@@ -1,8 +1,8 @@
 {
   "name": "claude-notify",
   "displayName": "Claude Notify",
-  "description": "Phone push (ntfy) when a Claude Code request finishes, with a status bar toggle",
-  "version": "2.0.0",
+  "description": "Phone push (ntfy) when a Claude Code request finishes or waits for you, with a status bar toggle",
+  "version": "2.1.0",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -50,6 +50,10 @@
       {
         "command": "claudeNotify.test",
         "title": "Claude Notify: отправить тестовое уведомление"
+      },
+      {
+        "command": "claudeNotify.setupHook",
+        "title": "Claude Notify: настроить хуки Claude Code"
       }
     ],
     "configuration": {
@@ -67,13 +71,23 @@
         },
         "claudeNotify.title": {
           "type": "string",
-          "default": "Claude Code",
-          "description": "Заголовок уведомления."
+          "default": "Claude Code · {project}",
+          "description": "Заголовок уведомления. Подстановка {project} - имя папки проекта, в котором работал Claude Code. Если проект неизвестен, подстановка и лишний разделитель убираются."
         },
         "claudeNotify.message": {
           "type": "string",
           "default": "Запрос в Claude Code завершён",
-          "description": "Текст уведомления."
+          "description": "Текст уведомления о завершении запроса. Поддерживает подстановку {project}."
+        },
+        "claudeNotify.notifyOnWaiting": {
+          "type": "boolean",
+          "default": true,
+          "description": "Отправлять отдельное уведомление, когда Claude Code ждёт вашего ответа или разрешения (требует хук Notification - см. команду «Claude Notify: настроить хуки Claude Code»)."
+        },
+        "claudeNotify.waitingMessage": {
+          "type": "string",
+          "default": "Claude ждёт вашего разрешения",
+          "description": "Текст уведомления, когда Claude Code ждёт ответа. Поддерживает подстановку {project}."
         },
         "claudeNotify.server": {
           "type": "string",

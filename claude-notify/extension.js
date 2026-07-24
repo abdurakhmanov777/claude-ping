@@ -5,12 +5,21 @@ const path = require('path');
 const https = require('https');
 const http = require('http');
 
-// The Stop hook in ~/.claude/settings.json just touches this file when a
-// Claude Code request finishes. All notification logic lives here in the
-// extension.
+// Hooks in ~/.claude/settings.json append the project directory to these files
+// when a Claude Code request finishes (Stop) or when Claude is waiting for the
+// user (Notification). All notification logic lives here in the extension.
 const claudeDir = path.join(os.homedir(), '.claude');
-const triggerName = '.ntfy-trigger';
-const triggerPath = path.join(claudeDir, triggerName);
+const settingsPath = path.join(claudeDir, 'settings.json');
+
+const DONE = 'done';
+const WAITING = 'waiting';
+
+const TRIGGERS = {};
+TRIGGERS[DONE] = '.ntfy-trigger';
+TRIGGERS[WAITING] = '.ntfy-trigger-waiting';
+
+// Any hook command mentioning this belongs to us and may be replaced on setup.
+const HOOK_MARKER = '.ntfy-trigger';
 
 const REQUEST_TIMEOUT_MS = 8000;
 const POLL_INTERVAL_MS = 3000;
@@ -26,6 +35,10 @@ function isEnabled() {
   return cfg().get('enabled', true);
 }
 
+function triggerPath(kind) {
+  return path.join(claudeDir, TRIGGERS[kind]);
+}
+
 function render(item) {
   if (isEnabled()) {
     item.text = '$(bell) Claude';
@@ -38,6 +51,31 @@ function render(item) {
   }
 }
 
+// Replace {project} in a title/message. When the project is unknown the
+// placeholder collapses and any separator it left behind is tidied away, so
+// "Claude Code · {project}" degrades to "Claude Code".
+function applyPlaceholders(text, project) {
+  const raw = String(text || '');
+  const hadPlaceholder = /\{project\}/.test(raw);
+  let out = raw.replace(/\{project\}/g, project || '');
+  if (hadPlaceholder && !project) {
+    out = out.replace(/\s*[-–—·:|,]+\s*$/, '').replace(/^\s*[-–—·:|,]+\s*/, '');
+  }
+  return out.replace(/\s{2,}/g, ' ').trim();
+}
+
+// The hook appends the project directory; take the last one written.
+function projectFromTrigger(content) {
+  const lines = String(content || '')
+    .split(/\r?\n/)
+    .map(function (s) { return s.trim(); })
+    .filter(function (s) { return s.length > 0; });
+  if (lines.length === 0) {
+    return '';
+  }
+  return path.basename(lines[lines.length - 1].replace(/[\\/]+$/, ''));
+}
+
 // Publish via ntfy's JSON endpoint (POST to the server root with a JSON body).
 // JSON body is UTF-8, so title and message keep Cyrillic intact - no
 // HTTP-header encoding issues, no curl.
@@ -45,7 +83,7 @@ function render(item) {
 // Returns a Promise that resolves on a 2xx response and rejects otherwise
 // (bad config, network error, timeout, or non-2xx status). Callers that only
 // fire-and-forget can ignore the rejection with .catch(() => {}).
-function sendNotification() {
+function sendNotification(kind, project) {
   return new Promise(function (resolve, reject) {
     const c = cfg();
     const topic = String(c.get('topic', '') || '').trim();
@@ -67,10 +105,15 @@ function sendNotification() {
       return;
     }
 
+    const rawMessage =
+      kind === WAITING
+        ? c.get('waitingMessage', 'Claude ждёт вашего разрешения')
+        : c.get('message', 'Запрос в Claude Code завершён');
+
     const data = {
       topic: topic,
-      title: String(c.get('title', 'Claude Code') || ''),
-      message: String(c.get('message', 'Запрос в Claude Code завершён') || ''),
+      title: applyPlaceholders(c.get('title', 'Claude Code · {project}'), project),
+      message: applyPlaceholders(rawMessage, project),
     };
 
     const priorityName = String(c.get('priority', 'default') || 'default');
@@ -160,29 +203,51 @@ function describeError(err) {
 }
 
 // Exactly-once across multiple VS Code windows: the first extension instance to
-// atomically rename the trigger away "wins" and sends; the others' rename fails.
-function handleTrigger() {
+// atomically rename the trigger away "wins"; the others' rename fails. Returns
+// the trigger's contents (the project dir the hook wrote), or null if another
+// window claimed it first.
+function claimTrigger(kind) {
+  const tPath = triggerPath(kind);
   const claim =
-    triggerPath + '.claim-' + process.pid + '-' + Math.random().toString(36).slice(2);
+    tPath + '.claim-' + process.pid + '-' + Math.random().toString(36).slice(2);
   try {
-    fs.renameSync(triggerPath, claim);
+    fs.renameSync(tPath, claim);
   } catch (e) {
-    return; // already claimed by another window, or gone
+    return null; // already claimed by another window, or gone
   }
+  let content = '';
+  try {
+    content = fs.readFileSync(claim, 'utf8');
+  } catch (e) { /* unreadable - treat as unknown project */ }
   try {
     fs.unlinkSync(claim);
   } catch (e) { /* ignore */ }
-  if (isEnabled()) {
-    sendNotification().catch(function () { /* offline / bad config - stay silent */ });
-  }
+  return content;
 }
 
-// Watch ~/.claude for the trigger file. fs.watch is fast but can miss events or
-// report a null filename on some platforms, and it throws if ~/.claude does not
-// exist yet - so back it up with a low-frequency existence poll that also
+function handleTrigger(kind) {
+  const content = claimTrigger(kind);
+  if (content === null) {
+    return;
+  }
+  if (!isEnabled()) {
+    return;
+  }
+  if (kind === WAITING && !cfg().get('notifyOnWaiting', true)) {
+    return;
+  }
+  sendNotification(kind, projectFromTrigger(content)).catch(function () {
+    /* offline / bad config - stay silent */
+  });
+}
+
+// Watch ~/.claude for the trigger files. fs.watch is fast but can miss events
+// or report a null filename on some platforms, and it throws if ~/.claude does
+// not exist yet - so back it up with a low-frequency existence poll that also
 // (re)establishes the watch once the directory appears.
 function startWatching(context) {
   let watcher = null;
+  const kinds = Object.keys(TRIGGERS);
 
   function tryWatch() {
     if (watcher) {
@@ -190,10 +255,12 @@ function startWatching(context) {
     }
     try {
       watcher = fs.watch(claudeDir, function (eventType, filename) {
-        // filename can be null on some platforms - fall back to a probe.
-        if (!filename || filename === triggerName) {
-          handleTrigger();
-        }
+        // filename can be null on some platforms - fall back to probing both.
+        kinds.forEach(function (kind) {
+          if (!filename || filename === TRIGGERS[kind]) {
+            handleTrigger(kind);
+          }
+        });
       });
       watcher.on('error', function () {
         try { watcher.close(); } catch (e) { /* ignore */ }
@@ -208,9 +275,11 @@ function startWatching(context) {
 
   const poll = setInterval(function () {
     tryWatch();
-    if (fs.existsSync(triggerPath)) {
-      handleTrigger();
-    }
+    kinds.forEach(function (kind) {
+      if (fs.existsSync(triggerPath(kind))) {
+        handleTrigger(kind);
+      }
+    });
   }, POLL_INTERVAL_MS);
 
   context.subscriptions.push({
@@ -223,6 +292,129 @@ function startWatching(context) {
   });
 }
 
+// --- Hook setup -------------------------------------------------------------
+
+function hasBash() {
+  const known = [
+    'C:\\Program Files\\Git\\bin\\bash.exe',
+    'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+  ];
+  for (let i = 0; i < known.length; i++) {
+    if (fs.existsSync(known[i])) {
+      return true;
+    }
+  }
+  return String(process.env.PATH || '')
+    .split(path.delimiter)
+    .some(function (dir) {
+      return dir && fs.existsSync(path.join(dir, 'bash.exe'));
+    });
+}
+
+// Pick hook commands for this machine. Both variants append $CLAUDE_PROJECT_DIR
+// so the extension can name the project in the push.
+function hookCommands() {
+  if (process.platform === 'win32' && !hasBash()) {
+    return {
+      shell: 'powershell',
+      done:
+        'Add-Content -Path "$env:USERPROFILE\\.claude\\' + TRIGGERS[DONE] +
+        '" -Value $env:CLAUDE_PROJECT_DIR',
+      waiting:
+        'Add-Content -Path "$env:USERPROFILE\\.claude\\' + TRIGGERS[WAITING] +
+        '" -Value $env:CLAUDE_PROJECT_DIR',
+    };
+  }
+  return {
+    shell: 'bash',
+    done: 'echo "$CLAUDE_PROJECT_DIR" >> "$HOME/.claude/' + TRIGGERS[DONE] + '" || true',
+    waiting:
+      'echo "$CLAUDE_PROJECT_DIR" >> "$HOME/.claude/' + TRIGGERS[WAITING] + '" || true',
+  };
+}
+
+// Drop our previous hooks for this event (keeping anyone else's, even inside a
+// shared group) and append a fresh one.
+function applyHook(hooks, event, shell, command) {
+  const list = Array.isArray(hooks[event]) ? hooks[event] : [];
+  const cleaned = [];
+  list.forEach(function (group) {
+    if (!group || !Array.isArray(group.hooks)) {
+      cleaned.push(group);
+      return;
+    }
+    const kept = group.hooks.filter(function (h) {
+      return !(h && typeof h.command === 'string' && h.command.indexOf(HOOK_MARKER) !== -1);
+    });
+    if (kept.length > 0) {
+      cleaned.push(Object.assign({}, group, { hooks: kept }));
+    }
+  });
+  cleaned.push({
+    hooks: [{ type: 'command', shell: shell, async: true, command: command }],
+  });
+  hooks[event] = cleaned;
+}
+
+function setupHooks() {
+  let raw = '';
+  let data = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      raw = fs.readFileSync(settingsPath, 'utf8');
+    } catch (e) {
+      vscode.window.showErrorMessage(
+        'Claude Notify: не удалось прочитать ~/.claude/settings.json.'
+      );
+      return;
+    }
+    if (raw.trim()) {
+      try {
+        data = JSON.parse(raw);
+      } catch (e) {
+        vscode.window.showErrorMessage(
+          'Claude Notify: в ~/.claude/settings.json невалидный JSON — исправьте его и повторите.'
+        );
+        return;
+      }
+    }
+  } else {
+    try {
+      fs.mkdirSync(claudeDir, { recursive: true });
+    } catch (e) { /* may already exist */ }
+  }
+
+  if (raw) {
+    try {
+      fs.writeFileSync(settingsPath + '.backup', raw, 'utf8');
+    } catch (e) { /* backup is best-effort */ }
+  }
+
+  if (!data.hooks || typeof data.hooks !== 'object' || Array.isArray(data.hooks)) {
+    data.hooks = {};
+  }
+  const cmds = hookCommands();
+  applyHook(data.hooks, 'Stop', cmds.shell, cmds.done);
+  applyHook(data.hooks, 'Notification', cmds.shell, cmds.waiting);
+
+  try {
+    fs.writeFileSync(settingsPath, JSON.stringify(data, null, 2) + '\n', 'utf8');
+  } catch (e) {
+    vscode.window.showErrorMessage(
+      'Claude Notify: не удалось записать ~/.claude/settings.json.'
+    );
+    return;
+  }
+
+  vscode.window.showInformationMessage(
+    'Claude Notify: хуки записаны в ~/.claude/settings.json (' + cmds.shell +
+      '). Прежняя версия сохранена как settings.json.backup. ' +
+      'Перезапустите сессию Claude Code, чтобы хуки применились.'
+  );
+}
+
+// --- Activation -------------------------------------------------------------
+
 function activate(context) {
   const item = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
@@ -234,10 +426,12 @@ function activate(context) {
   item.show();
   context.subscriptions.push(item);
 
-  // Drop any stale trigger left over from a session when no window was open.
-  try {
-    fs.unlinkSync(triggerPath);
-  } catch (e) { /* nothing to clean */ }
+  // Drop any stale triggers left over from a session when no window was open.
+  Object.keys(TRIGGERS).forEach(function (kind) {
+    try {
+      fs.unlinkSync(triggerPath(kind));
+    } catch (e) { /* nothing to clean */ }
+  });
 
   context.subscriptions.push(
     vscode.commands.registerCommand('claudeNotify.toggle', async function () {
@@ -257,8 +451,10 @@ function activate(context) {
         );
         return;
       }
+      const folders = vscode.workspace.workspaceFolders;
+      const project = folders && folders.length > 0 ? folders[0].name : '';
       try {
-        await sendNotification();
+        await sendNotification(DONE, project);
         vscode.window.setStatusBarMessage(
           'Claude Notify: тестовое уведомление отправлено ✓',
           4000
@@ -268,6 +464,12 @@ function activate(context) {
           'Claude Notify: не удалось отправить — ' + describeError(err)
         );
       }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('claudeNotify.setupHook', function () {
+      setupHooks();
     })
   );
 
